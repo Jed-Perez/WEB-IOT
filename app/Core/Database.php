@@ -22,10 +22,19 @@ final class Database
             $config['host'],
             $config['username'],
             $config['password'],
-            $config['database']
+            $config['database'],
+            $config['port']
         );
         self::$connection->set_charset('utf8mb4');
+        self::$connection->query("SET time_zone = '+00:00'");
 
         return self::$connection;
+    }
+
+    public static function query(string $sql, array $parameters = []): \mysqli_stmt
+    {
+        $statement = self::connection()->prepare($sql);
+        $statement->execute($parameters);
+        return $statement;
     }
 }

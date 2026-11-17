@@ -10,7 +10,16 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(24) NOT NULL DEFAULT 'Administrator';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(24) NOT NULL DEFAULT 'Farm Staff';
+
+CREATE TABLE IF NOT EXISTS remember_tokens (
+    token_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
+    user_id INT NOT NULL,
+    expires_at DATETIME NOT NULL,
+    INDEX idx_remember_user (user_id),
+    INDEX idx_remember_expiry (expires_at),
+    CONSTRAINT fk_remember_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS sensor_thresholds (
     sensor_key VARCHAR(32) PRIMARY KEY,
@@ -29,7 +38,7 @@ INSERT INTO sensor_thresholds (sensor_key, display_name, unit, scale_min, scale_
     ('humidity', 'Humidity', '%', 30, 100, 50, 70, 0, 2),
     ('ph', 'pH level', '', 4, 9, 5.5, 6.5, 1, 3),
     ('tds', 'TDS', 'ppm', 0, 1500, 560, 840, 0, 4)
-ON DUPLICATE KEY UPDATE display_name = VALUES(display_name);
+ON DUPLICATE KEY UPDATE sensor_key = VALUES(sensor_key);
 
 CREATE TABLE IF NOT EXISTS password_resets (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -48,4 +57,4 @@ ALTER TABLE password_resets
     ADD COLUMN IF NOT EXISTS attempt_count TINYINT UNSIGNED NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS verified_at DATETIME NULL;
 
--- No demo user seeded: open register.php to create an account.
+-- No demo user seeded: open /register to create an account.

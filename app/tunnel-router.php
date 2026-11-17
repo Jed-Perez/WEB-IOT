@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 $projectRoot = dirname(__DIR__);
-$basePath = '/WEBDEV_IOT_SEM_PROJ';
+$basePath = '/' . basename($projectRoot);
 $requestPath = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 
 if ($requestPath === $basePath) {

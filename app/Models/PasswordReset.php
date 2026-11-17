@@ -108,6 +108,8 @@ final class PasswordReset
             $update = $connection->prepare('UPDATE users SET password = ? WHERE id = ?');
             $update->bind_param('si', $passwordHash, $userId);
             $update->execute();
+            \App\Core\AccountSecurity::revoke($userId);
+            Activity::record($userId, 'password.reset', 'user', $userId, null, ['sessions_revoked' => true]);
 
             $resetId = (int) $reset['id'];
             $delete = $connection->prepare('DELETE FROM password_resets WHERE id = ?');

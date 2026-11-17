@@ -5,6 +5,9 @@ namespace App\Controllers;
 
 use App\Core\Controller;
 use App\Core\Mailer;
+use App\Core\RememberLogin;
+use App\Core\RateLimit;
+use App\Core\HttpException;
 use App\Models\PasswordReset;
 use App\Models\User;
 use RuntimeException;
@@ -27,20 +30,34 @@ final class AuthController extends Controller
 
     public function login(): void
     {
+        $this->requireCsrf();
         $email = trim((string) ($_POST['email'] ?? ''));
         $password = (string) ($_POST['password'] ?? '');
+        $remember = ($_POST['remember_me'] ?? '') === '1';
+        RateLimit::hit('login-ip', RateLimit::ip(), 50, 900);
+        RateLimit::hit('login-account', $email, 5, 900);
         $user = (new User())->findByEmail($email);
 
         if ($user !== null && password_verify($password, $user['password'])) {
+            RateLimit::clear('login-account', $email);
+            if ($user['status'] !== 'Active') {
+                $this->render('auth/login', ['error' => 'Your account is awaiting administrator approval or has been disabled.', 'email' => $email, 'notice' => '', 'remember' => $remember]);
+                return;
+            }
+            RememberLogin::forget();
             session_regenerate_id(true);
             $_SESSION['user_id'] = (int) $user['id'];
+            $_SESSION['session_version'] = (int) $user['session_version'];
+            unset($_SESSION['password_confirmed_at']);
+            if ($remember) RememberLogin::issue((int) $user['id']);
             redirect('dashboard');
         }
 
         $this->render('auth/login', [
             'error' => 'Invalid email or password.',
             'email' => $email,
-            'notice' => ''
+            'notice' => '',
+            'remember' => $remember,
         ]);
     }
 
@@ -85,6 +102,7 @@ final class AuthController extends Controller
             return;
         }
 
+        if (!$this->checkResetRateLimit($email, false)) return;
         unset($_SESSION['password_reset_user_id']);
         $user = (new User())->findByEmail($email);
         if ($user !== null) {
@@ -99,14 +117,7 @@ final class AuthController extends Controller
             } catch (RuntimeException $exception) {
                 $passwordReset->deleteForUser($userId);
                 error_log('GreenPulse password reset email delivery failed: ' . $exception->getMessage());
-                $this->render('auth/forgot-password', [
-                    'error' => 'The email service is not configured or could not send the code. Check SMTP settings and try again.',
-                    'email' => $email,
-                    'notice' => '',
-                    'otpStep' => false,
-                    'csrfToken' => $this->csrfToken()
-                ]);
-                return;
+                // Preserve the same public response for known and unknown accounts.
             }
         }
 
@@ -135,6 +146,7 @@ final class AuthController extends Controller
             return;
         }
 
+        if (!$this->checkResetRateLimit($email, true)) return;
         $user = filter_var($email, FILTER_VALIDATE_EMAIL)
             ? (new User())->findByEmail($email)
             : null;
@@ -183,8 +195,8 @@ final class AuthController extends Controller
             $error = 'Your session expired. Please request a new code.';
         } elseif ($userId < 1) {
             redirect('forgot-password');
-        } elseif (strlen($password) < 8) {
-            $error = 'Password must be at least 8 characters.';
+        } elseif (strlen($password) < 8 || strlen($password) > 72) {
+            $error = 'Password must contain 8 to 72 bytes.';
         } elseif ($password !== $passwordConfirmation) {
             $error = 'The password confirmation does not match.';
         } else {
@@ -220,23 +232,30 @@ final class AuthController extends Controller
 
     public function register(): void
     {
+        $this->requireCsrf();
+        RateLimit::hit('register-ip', RateLimit::ip(), 10, 3600);
         $name = trim((string) ($_POST['full_name'] ?? ''));
         $email = trim((string) ($_POST['email'] ?? ''));
         $password = (string) ($_POST['password'] ?? '');
         $error = '';
 
-        if ($name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        if ($name === '' || mb_strlen($name) > 100 || strlen($email) > 150 || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
             $error = 'Please enter your name and a valid email.';
-        } elseif (strlen($password) < 8) {
-            $error = 'Password must be at least 8 characters.';
+        } elseif (strlen($password) < 8 || strlen($password) > 72) {
+            $error = 'Password must contain 8 to 72 bytes.';
         } else {
             $userModel = new User();
             if ($userModel->findByEmail($email) !== null) {
                 $error = 'That email is already registered.';
             } else {
-                $userModel->create($name, $email, password_hash($password, PASSWORD_DEFAULT));
-                $_SESSION['flash'] = 'Account created. You can sign in now.';
-                redirect('');
+                try {
+                    $status = $userModel->create($name, $email, password_hash($password, PASSWORD_DEFAULT));
+                } catch (\mysqli_sql_exception $exception) {
+                    if ($exception->getCode() !== 1062) throw $exception;
+                    throw new \App\Core\HttpException(409, 'That email is already registered.');
+                }
+                $_SESSION['flash'] = $status === 'Active' ? 'Administrator account created. You can sign in now.' : 'Account created. An administrator must approve it before you can sign in.';
+                redirect('login');
             }
         }
 
@@ -249,6 +268,8 @@ final class AuthController extends Controller
 
     public function logout(): void
     {
+        $this->requireCsrf();
+        RememberLogin::forget();
         $_SESSION = [];
 
         if (ini_get('session.use_cookies')) {
@@ -260,6 +281,28 @@ final class AuthController extends Controller
         redirect('');
     }
 
+    private function checkResetRateLimit(string $email, bool $otpStep): bool
+    {
+        try {
+            $scope = $otpStep ? 'otp' : 'reset';
+            $seconds = $otpStep ? 900 : 3600;
+            RateLimit::hit($scope . '-ip', RateLimit::ip(), $otpStep ? 30 : 20, $seconds);
+            RateLimit::hit($scope . '-account', $email, $otpStep ? 5 : 3, $seconds);
+            return true;
+        } catch (HttpException $exception) {
+            if ($exception->status !== 429) throw $exception;
+            http_response_code(429);
+            $this->render('auth/forgot-password', [
+                'error' => $exception->getMessage(),
+                'email' => $email,
+                'notice' => '',
+                'otpStep' => $otpStep,
+                'csrfToken' => $this->csrfToken(),
+            ]);
+            return false;
+        }
+    }
+
     private function csrfToken(): string
     {
         if (!isset($_SESSION['csrf_token'])) {
@@ -267,6 +310,11 @@ final class AuthController extends Controller
         }
 
         return $_SESSION['csrf_token'];
+    }
+
+    private function requireCsrf(): void
+    {
+        if (!$this->hasValidCsrfToken()) throw new \App\Core\HttpException(403, 'Your session expired. Reload the form and try again.');
     }
 
     private function hasValidCsrfToken(): bool

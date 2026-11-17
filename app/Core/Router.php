@@ -20,16 +20,25 @@ final class Router
     public function dispatch(string $method, string $path): void
     {
         $path = rtrim($path, '/') ?: '/';
-        $handler = $this->routes[strtoupper($method) . ' ' . $path] ?? null;
+        $method = strtoupper($method);
+        $handler = $this->routes[($method === 'HEAD' ? 'GET' : $method) . ' ' . $path] ?? null;
 
         if ($handler === null) {
-            http_response_code(404);
-            echo '404 - Page not found';
-            return;
+            $allowed = [];
+            foreach (['GET', 'POST'] as $candidate) {
+                if (isset($this->routes[$candidate . ' ' . $path])) $allowed[] = $candidate;
+            }
+            if ($allowed) {
+                header('Allow: ' . implode(', ', $allowed));
+                throw new HttpException(405, 'Method not allowed.');
+            }
+            throw new HttpException(404, 'Page not found.');
         }
 
         [$controllerClass, $action] = $handler;
-        (new $controllerClass())->$action();
+        if ($method === 'HEAD') ob_start();
+        try { (new $controllerClass())->$action(); }
+        finally { if ($method === 'HEAD') ob_end_clean(); }
     }
 
     private function add(string $method, string $path, array $handler): void

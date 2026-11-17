@@ -1,285 +1,277 @@
-(() => {
-    const sensors = (window.greenPulseSensors || []).map((sensor) => ({
-        ...sensor,
-        value: ({ temperature: 23.4, humidity: 64, ph: 6.1, tds: 720 })[sensor.key],
-        minDay: null,
-        maxDay: null
-    }));
+﻿(() => {
+    "use strict";
+    const config = window.greenPulse;
     const $ = (selector) => document.querySelector(selector);
     const $$ = (selector) => [...document.querySelectorAll(selector)];
-    const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (character) => ({
-        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
-    })[character]);
-    const inRange = (sensor) => sensor.value >= sensor.low && sensor.value <= sensor.high;
-    let activeView = "dash";
-    let selectedSensor = sensors[0]?.name || "Temperature";
-    let selectedRange = 24;
-    let customFrom = "", customTo = "";
-    const commandFeedback = new Map();
+    const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    const date = (value) => value ? new Date(value.replace(" ", "T") + "Z") : null;
+    const dateLabel = (value) => date(value)?.toLocaleString() || "Never";
+    const number = (value, decimals = 1) => value === null || value === undefined ? "--" : Number(value).toFixed(decimals);
+    let snapshot = null, rows = [], users = [], editingUser = null;
+    let selectedSensor = "temperature", selectedRange = 24, activeView = "dash";
+    let historyRequest = 0, refreshing = false;
 
+    function message(text, error = false) {
+        const box = $("#api-message");
+        box.textContent = text;
+        box.classList.toggle("hide", !text);
+        box.classList.toggle("err", error);
+    }
+    async function api(path, body, retried = false) {
+        const response = await fetch(`${config.baseUrl}/${path}`, {
+            method: body === undefined ? "GET" : "POST",
+            credentials: "same-origin", cache: "no-store",
+            headers: body === undefined ? {} : { "Content-Type": "application/json", "X-CSRF-Token": config.csrf },
+            body: body === undefined ? undefined : JSON.stringify(body)
+        });
+        const data = await response.json().catch(() => ({ error: "The server returned an invalid response." }));
+        if (response.status === 428 && !retried && window.greenPulseConfirm) {
+            await window.greenPulseConfirm();
+            return api(path, body, true);
+        }
+        if (!response.ok) throw new Error(data.error || "Request failed.");
+        return data;
+    }
+    async function action(button, work) {
+        if (button) button.disabled = true;
+        try { await work(); } catch (error) { message(error.message, true); }
+        finally { if (button?.isConnected) button.disabled = false; }
+    }
     function renderGauges() {
-        $("#gauges").innerHTML = sensors.map((sensor) => {
-            const span = sensor.max - sensor.min;
-            const progress = Math.max(0, Math.min(100, (sensor.value - sensor.min) / span * 100));
-            const low = (sensor.low - sensor.min) / span * 100;
-            const high = (sensor.high - sensor.min) / span * 100;
-            const margin = (sensor.high - sensor.low) * .15;
-            const near = inRange(sensor) && (sensor.value >= sensor.high - margin || sensor.value <= sensor.low + margin);
-            const status = !inRange(sensor) ? (sensor.value < sensor.low ? "Too low" : "Too high") : near ? "Near limit" : "In range";
-            const tone = !inRange(sensor) ? "critical" : near ? "warn" : "";
-            const day = sensorValues(sensor, 24);
-            const minDay = sensor.minDay ?? Math.min(...day);
-            const maxDay = sensor.maxDay ?? Math.max(...day);
-            const change = day.at(-1) - day[0];
-            const trend = Math.abs(change) < (sensor.high - sensor.low) * .025 ? ["→", "Stable", "stable"] : change > 0 ? ["↑", "Rising", "rising"] : ["↓", "Falling", "falling"];
+        $("#gauges").innerHTML = snapshot.sensors.map((sensor) => {
+            const hasValue = sensor.value !== null;
+            const inRange = hasValue && sensor.value >= sensor.low && sensor.value <= sensor.high;
+            const tone = !hasValue ? "warn" : inRange ? "" : "critical";
+            const label = !hasValue ? "No readings" : inRange ? "In range" : sensor.value < sensor.low ? "Too low" : "Too high";
+            const progress = hasValue ? Math.max(0, Math.min(100, (sensor.value - sensor.min) / (sensor.max - sensor.min) * 100)) : 0;
             return `<div class="col-12 col-sm-6 col-xxl-3"><article class="card gauge h-100">
                 <div class="gn">${escapeHtml(sensor.name)}</div>
-                <svg viewBox="0 0 100 60" aria-hidden="true">
-                    <path d="M10 55A40 40 0 0 1 90 55" pathLength="100" fill="none" stroke="var(--line)" stroke-width="9" stroke-linecap="round"/>
-                    <path d="M10 55A40 40 0 0 1 90 55" pathLength="100" fill="none" stroke="#A8D672" stroke-opacity=".55" stroke-width="9" stroke-dasharray="${high-low} 100" stroke-dashoffset="${-low}"/>
-                    <path d="M10 55A40 40 0 0 1 90 55" pathLength="100" fill="none" stroke="${tone === "critical" ? "#C8452F" : tone === "warn" ? "#D98E1F" : "#2F6B3A"}" stroke-width="4" stroke-linecap="round" stroke-dasharray="${progress} 100"/>
-                </svg>
-                <div class="gv">${sensor.value.toFixed(sensor.decimals)}<small> ${escapeHtml(sensor.unit)}</small></div>
-                <span class="tag ${tone}">${status}</span>
-                <div class="gauge-trend trend-${trend[2]}" aria-label="Trend ${trend[1]}"><span aria-hidden="true">${trend[0]}</span> ${trend[1]}</div>
-                <div class="sub">Ideal ${sensor.low}–${sensor.high}${sensor.unit ? ` ${escapeHtml(sensor.unit)}` : ""}</div>
-                <div class="range-meta">Sample min <b>${minDay.toFixed(sensor.decimals)}</b> &middot; max <b>${maxDay.toFixed(sensor.decimals)}</b></div>
+                <svg viewBox="0 0 100 60" aria-hidden="true"><path d="M10 55A40 40 0 0 1 90 55" pathLength="100" fill="none" stroke="var(--line)" stroke-width="9" stroke-linecap="round"/><path d="M10 55A40 40 0 0 1 90 55" pathLength="100" fill="none" stroke="${tone === "critical" ? "#C8452F" : "#2F6B3A"}" stroke-width="5" stroke-dasharray="${progress} 100"/></svg>
+                <div class="gv">${number(sensor.value, sensor.decimals)}<small> ${escapeHtml(sensor.unit)}</small></div>
+                <span class="tag ${tone}">${label}</span><div class="sub">Ideal ${sensor.low}–${sensor.high} ${escapeHtml(sensor.unit)}</div>
+                <div class="range-meta">24h min <b>${number(sensor.minDay, sensor.decimals)}</b> · max <b>${number(sensor.maxDay, sensor.decimals)}</b></div>
             </article></div>`;
         }).join("");
     }
-
-    function sensorValues(sensor, count) {
-        const span = sensor.max - sensor.min;
-        return Array.from({ length: count }, (_, i) => Math.max(sensor.min, Math.min(sensor.max,
-            sensor.value + Math.sin(i / Math.max(2, count / 5)) * span * .1 + Math.sin(i * 1.7) * span * .025)));
+    function renderDevices() {
+        const device = snapshot.device;
+        const online = device.last_seen_at && Date.now() - date(device.last_seen_at).getTime() < 120000;
+        $("#device-status").textContent = online ? "Device online" : "Device offline";
+        $("#device-status").classList.toggle("warn", !online);
+        $("#upd").textContent = snapshot.recorded_at ? `Last reading: ${dateLabel(snapshot.recorded_at)}` : "Waiting for first reading";
+        $("#device-rows").innerHTML = `<tr><td>${escapeHtml(device.name)}</td><td>${escapeHtml(device.type)}</td><td>${online ? "Online" : "Offline"}${Number(device.configured) ? "" : " · key not configured"}</td><td>${escapeHtml(dateLabel(device.last_seen_at))}</td></tr>`;
     }
-
-    function renderChart() {
-        const sensor = sensors.find((item) => item.name === selectedSensor) || sensors[0];
-        if (!sensor) return;
-        const count = selectedRange === 24 ? 24 : selectedRange === 168 ? 28 : 30;
-        const width = 640, height = 260, left = 68, right = 18, top = 20, bottom = 34;
-        const values = sensorValues(sensor, count), span = sensor.max - sensor.min;
-        const x = (i) => left + i * (width - left - right) / (count - 1);
-        const y = (value) => height - bottom - (value - sensor.min) / span * (height - top - bottom);
-        const path = values.map((value, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(value).toFixed(1)}`).join("");
-        let grid = "";
-        for (let i = 0; i < 5; i++) {
-            const value = sensor.max - span * i / 4, yy = top + i * (height - top - bottom) / 4;
-            grid += `<line x1="${left}" x2="${width-right}" y1="${yy}" y2="${yy}" stroke="var(--line)"/><text x="${left-8}" y="${yy+4}" text-anchor="end" font-size="11" fill="var(--mute)">${value.toFixed(sensor.decimals)}${sensor.unit ? ` ${escapeHtml(sensor.unit)}` : ""}</text>`;
-        }
-        const labels = customFrom && customTo ? [customFrom, "1/3", "2/3", customTo] : ["Start", selectedRange === 24 ? "6h" : "1/3", selectedRange === 24 ? "12h" : "2/3", "Now"];
-        let ticks = "";
-        labels.forEach((label, i) => { ticks += `<text x="${left+i*(width-left-right)/3}" y="${height-8}" text-anchor="middle" font-size="11" fill="var(--mute)">${escapeHtml(label)}</text>`; });
-        const color = sensor.key === "humidity" ? "#3C8DAD" : sensor.key === "tds" ? "#8B6FC0" : sensor.key === "ph" ? "#D98E1F" : "#2F6B3A";
-        const points = values.map((value, i) => `<circle cx="${x(i)}" cy="${y(value)}" r="3" fill="${color}"><title>${value.toFixed(sensor.decimals)} ${escapeHtml(sensor.unit)} at ${labels[Math.min(3, Math.floor(i*4/count))]}</title></circle>`).join("");
-        $("#chart").innerHTML = `${grid}${ticks}<path d="${path}" fill="none" stroke="${color}" stroke-width="2.5"/>${points}`;
-        $("#chart").setAttribute("aria-label", `${sensor.name} sample trend, ${customFrom && customTo ? `${customFrom} to ${customTo}` : (selectedRange === 24 ? "24 hours" : selectedRange === 168 ? "7 days" : "30 days")}`);
-        $("#chart-legend").innerHTML = `<i style="background:${color}"></i>${escapeHtml(sensor.name)}${sensor.unit ? ` (${escapeHtml(sensor.unit)})` : ""}`;
-        renderHistory(sensor, values);
-    }
-
-    const events = [
-        { at: Date.now()-3*3600000, level: "w", device: "Greenhouse A", text: "Temperature 25.1 °C, above 24 °C", action: "Cooling fan switched on", status: "Active", unread: true },
-        { at: Date.now()-5*3600000, level: "w", device: "Nutrient tank", text: "pH 6.8, above 6.5", action: "Alert sent to staff", status: "Active", unread: true },
-        { at: Date.now()-8*3600000, level: "i", device: "Nutrient tank", text: "Nutrient tank refilled", action: "Logged by farm staff", status: "Acknowledged", unread: false },
-        { at: Date.now()-14*3600000, level: "b", device: "Greenhouse A", text: "Humidity 84%, above 70%", action: "Cooling fan switched on", status: "Active", unread: true }
-    ];
-    const levels = { w: "Warning", b: "Critical", i: "Info" };
     function renderAlerts() {
-        const filter = $("#alert-filter")?.value || "all";
-        const filtered = events.filter((event) => filter === "all" || event.level === filter);
-        $("#alerts").innerHTML = filtered.length ? filtered.map((event) => {
-            const index = events.indexOf(event);
-            const action = event.status === "Resolved" ? "Resolved" : `<button class="text-btn" data-alert-ack="${index}">Acknowledge</button><button class="text-btn" data-alert-resolve="${index}">Resolve</button>`;
-            return `<tr><td>${new Date(event.at).toLocaleString([], { dateStyle:"medium", timeStyle:"short" })}</td><td class="sev ${event.level}">${levels[event.level]}</td><td>${escapeHtml(event.device)}</td><td>${escapeHtml(event.text)}</td><td><span class="alert-state ${event.status.toLowerCase()}">${event.status}</span></td><td>${action}</td></tr>`;
-        }).join("") : `<tr><td colspan="6" class="empty-state">No alerts match this filter.</td></tr>`;
-        const unread = events.filter((event) => event.unread).length;
-        $("#unread-count").textContent = String(unread);
-        $("#notification-bell").setAttribute("aria-label", `${unread} unread alerts`);
+        if (!snapshot) return;
+        const filter = $("#alert-filter").value;
+        const levels = { w: "Warning", b: "Critical", i: "Info" };
+        const alerts = snapshot.alerts.filter((item) => filter === "all" || item.level === filter);
+        $("#alerts").innerHTML = alerts.map((item) => `<tr><td>${escapeHtml(dateLabel(item.created_at))}</td><td class="sev ${escapeHtml(item.level)}">${levels[item.level] || "Info"}</td><td>${escapeHtml(item.device)}</td><td>${escapeHtml(item.message)}</td><td>${escapeHtml(item.status)}</td><td>${item.status === "Resolved" ? "Resolved" : `${item.status === "Active" ? `<button class="text-btn" data-alert="${item.id}" data-status="Acknowledged">Acknowledge</button>` : ""}<button class="text-btn" data-alert="${item.id}" data-status="Resolved">Resolve</button>`}</td></tr>`).join("") || '<tr><td colspan="6" class="empty-state">No alerts match this filter.</td></tr>';
+        $("#unread-count").textContent = snapshot.unread_count;
+        $("#notification-bell").setAttribute("aria-label", `${snapshot.unread_count} active alerts`);
     }
-
-    const actuators = [
-        { name: "Cooling fan", mode: "auto", on: true, maxSeconds: 120, cooldownSeconds: 15, autoNote: "Running until temperature is 22 °C or lower" },
-        { name: "Water pump", mode: "auto", on: false, maxSeconds: 60, cooldownSeconds: 30 }
-    ];
     function renderActuators() {
-        $("#act").innerHTML = actuators.map((item, index) => {
-            const seconds = Math.max(0, Math.ceil(((item.cooldownUntil || 0) - Date.now()) / 1000));
-            const feedback = commandFeedback.get(index) || (seconds ? `Cooldown ${seconds}s` : `Max manual run ${item.maxSeconds}s`);
-            return `<div class="arow"><div class="actuator-heading"><b>${item.name}</b><span class="act-state ${item.on ? "is-on" : "is-off"}">${item.on ? "ON" : "OFF"}</span>
-                <button class="sw" type="button" role="switch" aria-label="${item.name}" aria-checked="${item.on}" ${item.mode === "auto" || seconds ? "disabled" : ""} data-toggle="${index}"></button></div>
-                <div class="actuator-details"><span class="sub">${escapeHtml(item.mode === "auto" ? (item.autoNote || "Running by sensor rules") : "Manual override")}</span>
-                    <div class="seg" data-mode="${index}"><button type="button" class="${item.mode === "auto" ? "on" : ""}" data-set-mode="auto">Auto</button><button type="button" class="${item.mode === "manual" ? "on" : ""}" data-set-mode="manual">Manual</button></div></div>
-                <small class="command-feedback" role="status">${escapeHtml(feedback)}${item.changedAt ? ` · Last changed by ${escapeHtml(item.changedBy)} at ${new Date(item.changedAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}` : ""}</small></div>`;
+        $("#act").innerHTML = snapshot.actuators.map((item) => {
+            const pending = item.command_status === "pending";
+            const fresh = item.reported_at && Date.now() - date(item.reported_at).getTime() < 120000;
+            const known = item.reported_on !== null && fresh;
+            const on = Number(item.reported_on) === 1;
+            const cooldown = item.cooldown_until ? Math.max(0, Math.ceil((date(item.cooldown_until).getTime() - Date.now()) / 1000)) : 0;
+            const state = known ? (on ? "ON" : "OFF") : "UNKNOWN";
+            const feedback = pending ? `Pending: ${item.requested_mode} ${Number(item.desired_on) ? "ON" : "OFF / automatic"}; waiting for device` : item.command_status ? `Last command: ${item.command_status}` : "No commands sent";
+            return `<div class="arow"><div class="actuator-heading"><b>${escapeHtml(item.name)}</b><span class="act-state ${known && on ? "is-on" : "is-off"}">${state}</span>
+                <button class="sw" type="button" role="switch" aria-label="${escapeHtml(item.name)}" aria-checked="${known && on}" data-toggle="${item.id}" ${pending || item.mode !== "manual" || !known || (!on && cooldown) ? "disabled" : ""}></button></div>
+                <div class="actuator-details"><span class="sub">Reported mode: ${escapeHtml(item.mode)}</span><div class="seg"><button type="button" data-mode="auto" data-actuator="${item.id}" class="${item.mode === "auto" ? "on" : ""}" ${pending ? "disabled" : ""}>Auto</button><button type="button" data-mode="manual" data-actuator="${item.id}" class="${item.mode === "manual" ? "on" : ""}" ${pending ? "disabled" : ""}>Manual</button></div></div>
+                <small class="command-feedback">${escapeHtml(feedback)} · max manual run ${item.max_seconds}s${cooldown ? ` · cooldown ${cooldown}s` : ""}<br>Last reported: ${escapeHtml(dateLabel(item.reported_at))}</small></div>`;
         }).join("");
     }
-
-    function logEvent(message, action, level = "i") {
-        events.unshift({ at: Date.now(), level, device: "Actuator", text: message, action, status: "Active", unread: true });
-        renderAlerts();
+    function rangeQuery() {
+        const fromValue = $("#chart-date-from").value, toValue = $("#chart-date-to").value;
+        if (Boolean(fromValue) !== Boolean(toValue)) throw new Error("Select both start and end dates.");
+        const end = toValue ? new Date(`${toValue}T00:00:00`) : new Date(Date.now() + 1000);
+        if (toValue) end.setDate(end.getDate() + 1);
+        const start = fromValue ? new Date(`${fromValue}T00:00:00`) : new Date(end.getTime() - selectedRange * 3600000);
+        if (end <= start || end - start > 31 * 86400000) throw new Error("Choose a date range of up to 31 days.");
+        const iso = (value) => value.toISOString().replace(/\.\d{3}Z$/, "Z");
+        return new URLSearchParams({ from: iso(start), to: iso(end) }).toString();
     }
-    function setActuator(index, on) {
-        const item = actuators[index];
-        if (item.mode !== "manual" || (item.cooldownUntil || 0) > Date.now()) return;
-        item.on = on;
-        item.changedAt = Date.now(); item.changedBy = "You";
-        commandFeedback.set(index, "Command sent · relay acknowledged (demo)");
-        logEvent(`${item.name} turned ${on ? "on" : "off"} in manual mode`, "Manual control");
-        if (on) item.runTimeout = setTimeout(() => {
-            item.on = false; item.cooldownUntil = Date.now() + item.cooldownSeconds * 1000;
-            item.mode = "auto"; commandFeedback.set(index, "Maximum run time reached · returned to Auto (demo)");
-            logEvent(`${item.name} reached its maximum run time and returned to Auto`, "Safety return"); renderActuators();
-        }, item.maxSeconds * 1000);
-        else { clearTimeout(item.runTimeout); item.cooldownUntil = Date.now() + item.cooldownSeconds * 1000; }
-        renderActuators();
+    async function loadHistory() {
+        const request = ++historyRequest;
+        try {
+            const result = await api(`history?${rangeQuery()}`);
+            if (request !== historyRequest) return;
+            rows = result.rows;
+            $("#history-status").textContent = result.truncated ? "Showing latest 1,000 readings. CSV includes the full selected range." : `${rows.length} stored readings in selected range`;
+            renderChart();
+        } catch (error) {
+            if (request !== historyRequest) return;
+            rows = []; renderChart();
+            $("#history-status").textContent = "History unavailable for the selected range.";
+            throw error;
+        }
     }
-
-    function renderHistory(sensor, values) {
-        const rows = values.slice(-12).map((value, index) => `<tr><td>Sample ${index + 1}</td><td>${escapeHtml(sensor.name)}</td><td>${value.toFixed(sensor.decimals)} ${escapeHtml(sensor.unit)}</td><td>${sensor.low}–${sensor.high}</td></tr>`).join("");
-        $("#history-rows").innerHTML = rows || `<tr><td colspan="4" class="empty-state">No sample history available.</td></tr>`;
-    }
-
-    function exportCsv() {
-        const sensor = sensors.find((item) => item.name === selectedSensor) || sensors[0];
+    function renderChart() {
+        const sensor = snapshot?.sensors.find((item) => item.key === selectedSensor);
         if (!sensor) return;
-        const values = sensorValues(sensor, selectedRange === 24 ? 24 : selectedRange === 168 ? 28 : 30);
-        const lines = [["Sample", sensor.name, "Unit", "Ideal minimum", "Ideal maximum"], ...values.map((value, i) => [`Sample ${i + 1}`, value.toFixed(sensor.decimals), sensor.unit, sensor.low, sensor.high])];
-        const csv = lines.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(",")).join("\r\n");
-        const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([csv], { type:"text/csv;charset=utf-8" }));
-        link.download = `greenpulse-${sensor.key}-${selectedRange}h-sample.csv`; link.click(); URL.revokeObjectURL(link.href);
+        $("#chart-legend").textContent = `${sensor.name} (${sensor.unit})`;
+        $("#history-rows").innerHTML = rows.slice(-100).reverse().map((row) => `<tr><td>${escapeHtml(dateLabel(row.recorded_at))}</td><td>${escapeHtml(sensor.name)}</td><td>${number(row[sensor.key], sensor.decimals)} ${escapeHtml(sensor.unit)}</td><td>${sensor.low}–${sensor.high}</td></tr>`).join("") || '<tr><td colspan="4" class="empty-state">No readings in this date range.</td></tr>';
+        if (!rows.length) {
+            $("#chart").innerHTML = '<text x="320" y="130" text-anchor="middle" fill="var(--mute)">No readings in this date range</text>';
+            return;
+        }
+        const values = rows.map((row) => Number(row[sensor.key]));
+        const min = Math.min(sensor.min, ...values), max = Math.max(sensor.max, ...values);
+        const times = rows.map((row) => date(row.recorded_at).getTime());
+        const first = times[0], last = times.at(-1);
+        const x = (i) => last === first ? 340 : 68 + (times[i] - first) / (last - first) * 554;
+        const y = (value) => 226 - (value - min) / (max - min || 1) * 206;
+        let grid = "";
+        for (let i = 0; i < 5; i++) {
+            const value = max - (max - min) * i / 4;
+            grid += `<line x1="68" x2="622" y1="${y(value)}" y2="${y(value)}" stroke="var(--line)"/><text x="60" y="${y(value) + 4}" text-anchor="end" font-size="11" fill="var(--mute)">${value.toFixed(sensor.decimals)}</text>`;
+        }
+        const path = values.map((value, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(value).toFixed(1)}`).join(" ");
+        const points = values.map((value, i) => `<circle cx="${x(i)}" cy="${y(value)}" r="2" fill="#2F6B3A"><title>${escapeHtml(dateLabel(rows[i].recorded_at))}: ${value}</title></circle>`).join("");
+        $("#chart").innerHTML = `${grid}<path d="${path}" fill="none" stroke="#2F6B3A" stroke-width="2"/>${points}<text x="68" y="252" font-size="10" fill="var(--mute)">${escapeHtml(dateLabel(rows[0].recorded_at))}</text><text x="622" y="252" text-anchor="end" font-size="10" fill="var(--mute)">${escapeHtml(dateLabel(rows.at(-1).recorded_at))}</text>`;
     }
-
-    const demoUsers = [{ name:"Alex Rivera", email:"alex@example.test" }, { name:"Jamie Santos", email:"jamie@example.test" }];
-    let editingUser = null;
-    function renderUsers() {
-        if (!$("#users")) return;
-        $("#users").innerHTML = demoUsers.map((user, index) => `<tr><td>${escapeHtml(user.name)}</td><td>${escapeHtml(user.email)}</td><td>Farm Staff</td><td class="table-actions"><button class="text-btn" data-edit-user="${index}">Edit</button><button class="text-btn danger-btn" data-delete-user="${index}">Delete</button></td></tr>`).join("");
+    async function refresh() {
+        if (refreshing) return;
+        refreshing = true;
+        try {
+            snapshot = await api("dashboard");
+            renderGauges(); renderDevices(); renderAlerts(); renderActuators();
+            await loadHistory();
+        } catch (error) {
+            $("#upd").textContent = "Connection failed · displayed data may be stale";
+            $("#device-status").textContent = "Connection unavailable";
+            $("#device-status").classList.add("warn");
+            $$("#act button").forEach((button) => { button.disabled = true; });
+            message(error.message, true);
+        } finally { refreshing = false; }
     }
-    function openUserDialog(index = null) {
-        editingUser = index; const user = index === null ? { name:"", email:"" } : demoUsers[index];
-        $("#user-dialog-title").textContent = index === null ? "Add demo user" : "Edit demo user";
-        $("#user-name").value = user.name; $("#user-email").value = user.email; $("#user-dialog").showModal();
+    async function loadUsers() {
+        if (!config.isAdmin) return;
+        users = (await api("users")).users;
+        $("#users").innerHTML = users.map((user) => `<tr><td>${escapeHtml(user.full_name)}</td><td>${escapeHtml(user.email)}</td><td>${escapeHtml(user.role)}</td><td>${escapeHtml(user.status)}</td><td class="table-actions">${user.status === "Pending" ? `<button class="text-btn" data-approve-user="${user.id}">Approve</button>` : ""}<button class="text-btn" data-edit-user="${user.id}">Edit</button>${Number(user.id) !== config.userId ? `<button class="text-btn danger-btn" data-delete-user="${user.id}">Delete</button>` : ""}</td></tr>`).join("");
     }
-
+    function openUserDialog(id = null) {
+        editingUser = id;
+        const user = users.find((item) => Number(item.id) === id);
+        $("#user-dialog-title").textContent = id === null ? "Add user" : "Edit user";
+        $("#user-name").value = user?.full_name || "";
+        $("#user-email").value = user?.email || "";
+        $("#user-role").value = user?.role || "Farm Staff";
+        $("#user-status").value = user?.status || "Active";
+        $("#user-password").value = "";
+        $("#user-password").required = id === null;
+        $("#user-error").textContent = "";
+        $("#user-dialog").showModal();
+    }
     function showView(view) {
         activeView = view;
-        const titles = { dash:"Greenhouse A", act:"Actuator control", alerts:"Alert log", admin:"Admin management", profile:"Profile", settings:"Settings", devices:"Devices", reports:"Reports / History" };
-        $("#title").textContent = titles[view] || "Greenhouse A";
+        const titles = { dash: "Greenhouse A", act: "Actuator control", alerts: "Alert log", admin: "Admin management", profile: "Profile", settings: "Settings", devices: "Devices", reports: "Reports / History", activity: "Activity log", operations: "Email & backups" };
+        $("#title").textContent = titles[view];
         $$(".nav[data-v]").forEach((button) => {
-            const active = button.dataset.v === view;
-            button.classList.toggle("on", active);
-            if (active) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
+            button.classList.toggle("on", button.dataset.v === view);
+            if (button.dataset.v === view) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
         });
-        const secondary = { admin:"admin-panel", profile:"profile-panel", settings:"settings-panel", devices:"devices-panel", reports:"reports-panel" };
+        const secondary = { admin: "admin-panel", profile: "profile-panel", settings: "settings-panel", devices: "devices-panel", reports: "reports-panel", activity: "activity-panel", operations: "operations-panel" };
         $$(".dashboard-part").forEach((part) => part.classList.toggle("hide", Boolean(secondary[view])));
-        Object.entries(secondary).forEach(([key, id]) => { const panel = $(`#${id}`); if (panel) panel.classList.toggle("hide", view !== key); });
-        const environment = $("#gauges").closest("section");
-        const telemetry = $("#actuators").closest("section[aria-label]");
-        const alerts = $("#alert-log");
-        const chartColumn = $("#chart-column");
-        const actuatorColumn = $("#actuator-column");
+        Object.entries(secondary).forEach(([key, id]) => $(`#${id}`)?.classList.toggle("hide", view !== key));
         $(".demo-note").classList.toggle("hide", view !== "dash");
-        telemetry.classList.remove("actuators-only");
-        chartColumn.classList.remove("hide");
-        actuatorColumn.classList.remove("hide");
-        if (["dash", "act", "alerts"].includes(view)) {
-            environment.classList.toggle("hide", view !== "dash");
+        if (!secondary[view]) {
+            $("#gauges").closest("section").classList.toggle("hide", view !== "dash");
+            const telemetry = $("#actuators").closest("section[aria-label]");
             telemetry.classList.toggle("hide", view === "alerts");
-            alerts.classList.toggle("hide", view !== "alerts" && view !== "dash");
-            chartColumn.classList.toggle("hide", view === "act");
-            if (view === "act") telemetry.classList.add("actuators-only");
+            telemetry.classList.toggle("actuators-only", view === "act");
+            $("#chart-column").classList.toggle("hide", view === "act");
+            $("#alert-log").classList.toggle("hide", view === "act");
         }
-        if (secondary[view] && view === "admin") renderUsers();
+        if (view === "admin") action(null, loadUsers);
+        if (view === "activity") window.greenPulseActivity?.();
+        if (view === "operations") window.greenPulseOperations?.();
+        if (view === "reports") window.greenPulseReport?.();
         $("#sidebar").classList.remove("open"); $("#mobile-menu").setAttribute("aria-expanded", "false");
     }
 
-    $("#act").addEventListener("click", (event) => {
-        const toggle = event.target.closest("[data-toggle]"), mode = event.target.closest("[data-set-mode]");
-        if (toggle) setActuator(Number(toggle.dataset.toggle), !actuators[Number(toggle.dataset.toggle)].on);
-        if (mode) {
-            const index = Number(mode.parentNode.dataset.mode), item = actuators[index];
-            if ((item.cooldownUntil || 0) > Date.now()) return;
-            clearTimeout(item.runTimeout); item.mode = mode.dataset.setMode; item.changedAt = Date.now(); item.changedBy = "You";
-            commandFeedback.set(index, `Command sent · ${item.mode} mode selected (demo)`);
-            if (item.mode === "manual" && item.on) {
-                item.runTimeout = setTimeout(() => {
-                    item.on = false; item.mode = "auto"; item.cooldownUntil = Date.now() + item.cooldownSeconds * 1000;
-                    commandFeedback.set(index, "Maximum run time reached · returned to Auto (demo)");
-                    logEvent(`${item.name} reached its maximum run time and returned to Auto`, "Safety return"); renderActuators();
-                }, item.maxSeconds * 1000);
-            }
-            if (item.mode === "auto" && index === 1 && item.on) {
-                item.on = false; item.cooldownUntil = Date.now() + item.cooldownSeconds * 1000;
-                commandFeedback.set(index, "Pump stopped · cooldown started (demo)");
-            }
-            logEvent(`${item.name} set to ${item.mode} mode`, "Mode change"); renderActuators();
-        }
-    });
-    $("#sensor-select").addEventListener("click", (event) => {
-        const button = event.target.closest("[data-sensor]"); if (!button) return;
-        selectedSensor = button.dataset.sensor; $$("#sensor-select button").forEach((item) => item.classList.toggle("on", item === button)); renderChart();
-    });
-    $("#rng").addEventListener("click", (event) => {
-        const button = event.target.closest("[data-h]"); if (!button) return;
-        $("#chart-date-from").value = ""; $("#chart-date-to").value = ""; customFrom = ""; customTo = "";
-        selectedRange = Number(button.dataset.h); $$("#rng button").forEach((item) => item.classList.toggle("on", item === button)); renderChart();
-    });
-    function updateCustomRange() {
-        customFrom = $("#chart-date-from").value; customTo = $("#chart-date-to").value;
-        $("#chart-date-to").min = customFrom;
-        $("#chart-date-from").max = customTo || "";
-        if (!customFrom || !customTo || customTo < customFrom) return;
-        const days = Math.max(1, Math.ceil((new Date(customTo) - new Date(customFrom)) / 86400000) + 1);
-        selectedRange = days <= 1 ? 24 : days <= 7 ? 168 : 720;
-        renderChart();
-    }
-    $("#chart-date-from").addEventListener("change", updateCustomRange);
-    $("#chart-date-to").addEventListener("change", updateCustomRange);
-    $("#export-chart").addEventListener("click", exportCsv);
-    $("#export-history").addEventListener("click", exportCsv);
-    $("#print-report").addEventListener("click", () => window.print());
+    $$(".nav[data-v], .text-btn[data-v]").forEach((button) => button.addEventListener("click", () => showView(button.dataset.v)));
+    $("#mobile-menu").addEventListener("click", () => $("#mobile-menu").setAttribute("aria-expanded", String($("#sidebar").classList.toggle("open"))));
     $("#alert-filter").addEventListener("change", renderAlerts);
-    $("#alerts").addEventListener("click", (event) => {
-        const ack = event.target.closest("[data-alert-ack]"), resolve = event.target.closest("[data-alert-resolve]");
-        const index = Number((ack || resolve)?.dataset.alertAck ?? (ack || resolve)?.dataset.alertResolve);
-        if (!Number.isInteger(index) || !events[index]) return;
-        events[index].status = resolve ? "Resolved" : "Acknowledged"; events[index].unread = false; renderAlerts();
-    });
-    $$(".nav[data-v]").forEach((button) => button.addEventListener("click", () => showView(button.dataset.v)));
-    $(".text-btn[data-v='alerts']").addEventListener("click", () => showView("alerts"));
-    $("#mobile-menu").addEventListener("click", () => {
-        const open = $("#sidebar").classList.toggle("open"); $("#mobile-menu").setAttribute("aria-expanded", String(open));
-    });
     $("#notification-bell").addEventListener("click", () => {
-        const unread = events.filter((item) => item.unread);
-        $("#notification-popover").innerHTML = unread.length ? `<b>${unread.length} unread alerts</b><br>${unread.slice(0,3).map((item) => escapeHtml(item.text)).join("<br>")}` : "No unread alerts.";
+        $("#notification-popover").textContent = snapshot ? `${snapshot.unread_count} active alerts. Open the alert log to review them.` : "Loading alerts...";
         $("#notification-popover").classList.toggle("hide");
     });
+    $("#alerts").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-alert]");
+        if (button) action(button, async () => { await api("alerts/update", { id: Number(button.dataset.alert), status: button.dataset.status }); await refresh(); });
+    });
+    $("#act").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-toggle], [data-mode]");
+        if (!button || !snapshot) return;
+        const id = Number(button.dataset.toggle || button.dataset.actuator);
+        const item = snapshot.actuators.find((actuator) => Number(actuator.id) === id);
+        action(button, async () => {
+            const result = await api("actuators/command", { id, mode: button.dataset.mode || "manual", on: button.dataset.toggle ? !Number(item.reported_on) : false });
+            message(result.message); await refresh();
+        });
+    });
+    $("#sensor-select").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-sensor]");
+        if (!button) return;
+        selectedSensor = { Temperature: "temperature", Humidity: "humidity", "pH level": "ph", TDS: "tds" }[button.dataset.sensor];
+        $$("#sensor-select button").forEach((item) => item.classList.toggle("on", item === button)); renderChart();
+    });
+    $("#rng").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-h]");
+        if (!button) return;
+        selectedRange = Number(button.dataset.h);
+        $("#chart-date-from").value = ""; $("#chart-date-to").value = "";
+        $$("#rng button").forEach((item) => item.classList.toggle("on", item === button));
+        action(null, loadHistory);
+    });
+    ["#chart-date-from", "#chart-date-to"].forEach((selector) => $(selector).addEventListener("change", () => {
+        if ($("#chart-date-from").value && $("#chart-date-to").value) {
+            $$("#rng button").forEach((item) => item.classList.remove("on")); action(null, loadHistory);
+        }
+    }));
+    ["#export-chart", "#export-history"].forEach((selector) => $(selector).addEventListener("click", () => action(null, async () => {
+        window.location.assign(`${config.baseUrl}/history/export?${rangeQuery()}`);
+    })));
+    $("#print-report").addEventListener("click", () => window.print());
     $("#add-user")?.addEventListener("click", () => openUserDialog());
-    $("#cancel-user")?.addEventListener("click", () => $("#user-dialog").close());
-    $("#user-form")?.addEventListener("submit", (event) => {
-        event.preventDefault(); if (!event.currentTarget.reportValidity()) return;
-        const user = { name:$("#user-name").value.trim(), email:$("#user-email").value.trim() };
-        if (editingUser === null) demoUsers.push(user); else demoUsers[editingUser] = user;
-        renderUsers(); $("#user-dialog").close();
+    $("#cancel-user").addEventListener("click", () => $("#user-dialog").close());
+    $("#user-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const button = event.submitter; button.disabled = true;
+        try {
+            await api("users/save", { ...(editingUser === null ? {} : { id: editingUser }), full_name: $("#user-name").value, email: $("#user-email").value, role: $("#user-role").value, status: $("#user-status").value, password: $("#user-password").value });
+            $("#user-dialog").close();
+            if (editingUser === config.userId) { window.location.reload(); return; }
+            await loadUsers(); message("Account saved.");
+        } catch (error) { $("#user-error").textContent = error.message; }
+        finally { button.disabled = false; }
     });
     $("#users")?.addEventListener("click", (event) => {
+        const approve = event.target.closest("[data-approve-user]");
+        if (approve) action(approve, async () => {
+            const user = users.find((item) => Number(item.id) === Number(approve.dataset.approveUser));
+            await api("users/save", { id: Number(user.id), full_name: user.full_name, email: user.email, role: user.role, status: "Active" });
+            await loadUsers(); message("Account approved. The user can now sign in.");
+        });
         const edit = event.target.closest("[data-edit-user]"), remove = event.target.closest("[data-delete-user]");
         if (edit) openUserDialog(Number(edit.dataset.editUser));
-        if (remove) { demoUsers.splice(Number(remove.dataset.deleteUser), 1); renderUsers(); }
+        if (remove && window.confirm("Delete this account? This cannot be undone.")) action(remove, async () => { await api("users/delete", { id: Number(remove.dataset.deleteUser) }); await loadUsers(); });
     });
-
-    renderGauges(); renderChart(); renderActuators(); renderAlerts(); renderUsers(); showView("dash");
-    const updatedAt = Date.now();
-    setInterval(() => {
-        const elapsed = Math.floor((Date.now() - updatedAt) / 1000);
-        $("#upd").textContent = `Sample readings · updated ${elapsed < 5 ? "just now" : `${elapsed}s ago`}`;
-        let actuatorChanged = false;
-        actuators.forEach((item) => {
-            if (item.cooldownUntil && item.cooldownUntil <= Date.now()) { item.cooldownUntil = 0; actuatorChanged = true; }
-            else if (item.cooldownUntil > Date.now()) actuatorChanged = true;
+    $("#rotate-device-key")?.addEventListener("click", (event) => {
+        if (!window.confirm("Generate a new device key? Any previous key will stop working.")) return;
+        action(event.currentTarget, async () => {
+            const result = await api("devices/key", { id: 1 });
+            $("#device-key").textContent = result.api_key;
+            await refresh();
         });
-        if (actuatorChanged) renderActuators();
-    }, 1000);
+    });
+    window.greenPulseApi = api;
+    window.greenPulseMessage = message;
+    showView("dash"); refresh();
+    setInterval(() => { if (!document.hidden) refresh(); }, 15000);
 })();

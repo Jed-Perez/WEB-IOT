@@ -20,9 +20,10 @@
     </div>
     <div class="formwrap">
         <form method="post" action="<?= e(url('register')) ?>">
+            <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
             <button class="btn btn-light btn-sm theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark mode">Dark mode</button>
             <h2>Create account</h2>
-            <p class="sub">Set up your farm account to get started.</p>
+            <p class="sub">Create your account. An administrator must approve new staff accounts before sign-in.</p>
 
             <?php if ($error !== ''): ?>
                 <div class="err" role="alert"><?= e($error) ?></div>

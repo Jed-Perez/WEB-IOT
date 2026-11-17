@@ -88,6 +88,8 @@ th{color:var(--mute);font-weight:500}
 
 #login{background:linear-gradient(90deg,rgba(9,18,13,.78),rgba(9,18,13,.25)),url("../images/BG_LOGIN_PAGE.jpg");background-size:cover;background-position:center}
 .hero{background:none}
+#login .remember-option{display:flex;align-items:center;gap:9px;cursor:pointer;font-weight:500}
+#login .remember-option input{width:18px;height:18px;min-width:18px;padding:0;margin:0;accent-color:var(--leaf);cursor:pointer}
 .auth-link{margin:0;text-align:center;color:var(--mute);font-size:14px}
 .auth-link a{color:var(--leaf);font-weight:600;text-decoration:none}
 .auth-link a:hover{text-decoration:underline}
@@ -1045,3 +1047,10 @@ html[data-bs-theme="dark"] .landing-nav nav .landing-theme-toggle{color:#e3eee5}
     .threshold-row{grid-template-columns:1fr 1fr}.threshold-row>strong{grid-column:1/-1}
 }
 @media print{#sidebar,.top,.demo-note,.chart-controls,.theme-toggle,.notification-bell,#alert-log,#actuators{display:none!important}#app{display:block}main{padding:0}.view-panel{display:block!important}.card{break-inside:avoid;box-shadow:none!important}}
+
+#confirm-password-dialog{width:min(440px,calc(100vw - 32px));padding:24px;border:1px solid var(--line);border-radius:16px;background:var(--card);color:var(--ink)}
+#confirm-password-dialog::backdrop{background:rgba(0,0,0,.5)}
+#confirm-password-form{display:grid;gap:16px}
+.report-controls{display:flex;flex-wrap:wrap;align-items:end;gap:12px;margin:16px 0}
+#activity-panel pre{max-width:380px;white-space:pre-wrap;overflow-wrap:anywhere}
+#maintenance-status{margin-top:16px}

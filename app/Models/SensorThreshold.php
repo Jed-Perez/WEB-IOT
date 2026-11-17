@@ -44,17 +44,19 @@ final class SensorThreshold
         return $thresholds;
     }
 
-    public function updateAll(array $values): void
+    public function updateAll(array $values, ?int $actor = null): void
     {
         $database = Database::connection();
         $statement = $database->prepare('UPDATE sensor_thresholds SET ideal_min = ?, ideal_max = ? WHERE sensor_key = ?');
         $database->begin_transaction();
         try {
+            $before = Database::query('SELECT sensor_key, ideal_min, ideal_max FROM sensor_thresholds ORDER BY sensor_key FOR UPDATE')->get_result()->fetch_all(MYSQLI_ASSOC);
             foreach ($values as $key => [$low, $high]) {
                 $statement->bind_param('dds', $low, $high, $key);
                 $statement->execute();
                 if ($statement->affected_rows < 0) throw new \RuntimeException('Could not save threshold.');
             }
+            Activity::record($actor, 'thresholds.update', 'thresholds', 'all', $before, $values);
             $database->commit();
         } catch (\Throwable $exception) {
             $database->rollback();

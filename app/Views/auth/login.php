@@ -20,6 +20,7 @@
     </div>
     <div class="formwrap">
         <form method="post" action="<?= e(url('login')) ?>">
+            <input type="hidden" name="csrf_token" value="<?= e(csrf_token()) ?>">
             <button class="btn btn-light btn-sm theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark mode">Dark mode</button>
             <h2>Sign in</h2>
             <p class="sub">Use your farm account to open the dashboard.</p>
@@ -35,6 +36,10 @@
             </label>
             <label for="password">Password
                 <input class="form-control" id="password" name="password" type="password" autocomplete="current-password" required>
+            </label>
+            <label class="remember-option" for="remember_me">
+                <input id="remember_me" name="remember_me" type="checkbox" value="1" <?= !empty($remember) ? 'checked' : '' ?>>
+                <span>Remember me for 30 days</span>
             </label>
             <p class="auth-link"><a href="<?= e(url('forgot-password')) ?>">Forgot password?</a></p>
             <button class="btn btn-success w-100" type="submit">Sign in</button>

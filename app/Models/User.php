@@ -4,14 +4,13 @@ declare(strict_types=1);
 namespace App\Models;
 
 use App\Core\Database;
-use mysqli_sql_exception;
 
 final class User
 {
     public function findByEmail(string $email): ?array
     {
         $statement = Database::connection()->prepare(
-            'SELECT id, full_name, email, password FROM users WHERE email = ?'
+            'SELECT id, full_name, email, password, status, session_version FROM users WHERE email = ?'
         );
         $statement->bind_param('s', $email);
         $statement->execute();
@@ -23,13 +22,7 @@ final class User
     public function findById(int $id): ?array
     {
         $database = Database::connection();
-        try {
-            $statement = $database->prepare('SELECT id, full_name, email, role FROM users WHERE id = ?');
-        } catch (mysqli_sql_exception $exception) {
-            if ((int) $exception->getCode() !== 1054) throw $exception;
-            $database->query("ALTER TABLE users ADD COLUMN role VARCHAR(24) NOT NULL DEFAULT 'Administrator'");
-            $statement = $database->prepare('SELECT id, full_name, email, role FROM users WHERE id = ?');
-        }
+        $statement = $database->prepare('SELECT id, full_name, email, role, status, session_version FROM users WHERE id = ?');
         $statement->bind_param('i', $id);
         $statement->execute();
 
@@ -37,19 +30,22 @@ final class User
         return $user ?: null;
     }
 
-    public function create(string $name, string $email, string $passwordHash): void
+    public function create(string $name, string $email, string $passwordHash): string
     {
         $database = Database::connection();
-        $role = (int) $database->query('SELECT COUNT(*) AS total FROM users')->fetch_assoc()['total'] === 0
-            ? 'Administrator' : 'Farm Staff';
+        $lockName = 'greenpulse-register-' . ($database->query('SELECT DATABASE() name')->fetch_assoc()['name']);
+        $lock = Database::query('SELECT GET_LOCK(?, 5) acquired', [$lockName])->get_result()->fetch_assoc();
+        if ((int) $lock['acquired'] !== 1) throw new \RuntimeException('Registration is busy.');
         try {
-            $statement = $database->prepare('INSERT INTO users (full_name, email, password, role) VALUES (?, ?, ?, ?)');
-        } catch (mysqli_sql_exception $exception) {
-            if ((int) $exception->getCode() !== 1054) throw $exception;
-            $database->query("ALTER TABLE users ADD COLUMN role VARCHAR(24) NOT NULL DEFAULT 'Administrator'");
-            $statement = $database->prepare('INSERT INTO users (full_name, email, password, role) VALUES (?, ?, ?, ?)');
+            $role = (int) $database->query('SELECT COUNT(*) AS total FROM users')->fetch_assoc()['total'] === 0
+                ? 'Administrator' : 'Farm Staff';
+            $status = $role === 'Administrator' ? 'Active' : 'Pending';
+            $statement = $database->prepare('INSERT INTO users (full_name, email, password, role, status) VALUES (?, ?, ?, ?, ?)');
+            $statement->bind_param('sssss', $name, $email, $passwordHash, $role, $status);
+            $statement->execute();
+            return $status;
+        } finally {
+            Database::query('SELECT RELEASE_LOCK(?)', [$lockName]);
         }
-        $statement->bind_param('ssss', $name, $email, $passwordHash, $role);
-        $statement->execute();
     }
 }

@@ -1,6 +1,6 @@
 <section id="app">
     <script>
-        window.greenPulseSensors = <?= json_encode($thresholds, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>.map((sensor) => ({ ...sensor, value: ({temperature:23.4, humidity:64, ph:6.1, tds:720})[sensor.key], minDay: null, maxDay: null }));
+        window.greenPulse = <?= json_encode(['baseUrl' => url('api'), 'csrf' => $csrfToken, 'userId' => (int) $user['id'], 'isAdmin' => $isAdmin], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
     </script>
     <aside id="sidebar">
         <div class="brand">
@@ -15,17 +15,18 @@
         <button class="nav" type="button" data-v="reports">Reports / History</button>
         <button class="nav" type="button" data-v="devices">Devices</button>
         <?php if ($isAdmin): ?><button class="nav" id="admin-nav" type="button" data-v="admin">Admin management</button><?php endif; ?>
+        <?php if ($isAdmin): ?><button class="nav" type="button" data-v="activity">Activity log</button><button class="nav" type="button" data-v="operations">Email &amp; backups</button><?php endif; ?>
         <button class="nav" type="button" data-v="profile">Profile</button>
         <button class="nav" type="button" data-v="settings">Settings</button>
         <div class="spacer"></div>
-        <a class="nav" href="<?= e(url('logout')) ?>">Sign out</a>
+        <form method="post" action="<?= e(url('logout')) ?>"><input type="hidden" name="csrf_token" value="<?= e($csrfToken) ?>"><button class="nav" type="submit">Sign out</button></form>
     </aside>
     <main class="container-fluid">
         <div class="top">
             <div>
                 <button class="mobile-menu" type="button" id="mobile-menu" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
                 <h2 id="title">Greenhouse A</h2>
-                <span class="live"><span class="dot"></span><span id="upd">Demo readings</span></span>
+                <span class="live"><span class="dot"></span><span id="upd">Loading readings...</span></span>
             </div>
             <div class="user">
                 <button class="notification-bell" type="button" id="notification-bell" aria-label="Unread alerts">♢ <span id="unread-count">0</span></button>
@@ -37,13 +38,14 @@
                 <button class="btn btn-outline-success btn-sm theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark mode">Dark mode</button>
             </div>
         </div>
-        <p class="demo-note dashboard-part" role="status"><strong>Prototype mode:</strong> readings, alerts, actuator controls, and device status are sample data only. No live sensors or relay controls are connected.</p>
+        <p class="demo-note dashboard-part" role="status">Readings are stored when your device sends telemetry. Commands remain pending until the device acknowledges them.</p>
+        <p id="api-message" class="notice hide" role="status" aria-live="polite"></p>
         <?php if ($notice !== ''): ?><p class="notice dashboard-notice" role="status"><?= e($notice) ?></p><?php endif; ?>
 
         <section class="dashboard-part" aria-label="Environmental monitoring">
             <div class="section-heading">
                 <div><h3>Environmental monitoring</h3><p class="sub">Lettuce growing ranges · Greenhouse A</p></div>
-                <span class="tag warn" id="device-status"><span class="status-dot"></span>Device offline · demo data</span>
+                <span class="tag warn" id="device-status">Waiting for device</span>
             </div>
             <div class="row g-3" id="gauges"></div>
         </section>
@@ -52,7 +54,7 @@
             <div class="col-12 col-xl-7" id="chart-column">
                 <div class="card h-100">
                     <div class="ch">
-                        <div><h3>Historical telemetry</h3><p class="sub">Sample readings by sensor</p></div>
+                        <div><h3>Historical telemetry</h3><p class="sub" id="history-status">Stored readings by sensor</p></div>
                         <div class="chart-controls">
                             <div class="seg" id="sensor-select" aria-label="Select chart sensor">
                                 <button class="on" type="button" data-sensor="Temperature">Temp</button><button type="button" data-sensor="Humidity">Humidity</button><button type="button" data-sensor="pH level">pH</button><button type="button" data-sensor="TDS">TDS</button>
@@ -63,7 +65,7 @@
                             <button class="btn btn-outline-success btn-sm" id="export-chart" type="button">Export CSV</button>
                         </div>
                     </div>
-                    <svg class="chart" id="chart" viewBox="0 0 640 260" role="img" aria-label="Sample sensor readings over time"></svg>
+                    <svg class="chart" id="chart" viewBox="0 0 640 260" role="img" aria-label="Sensor readings over time"></svg>
                     <div class="leg"><span id="chart-legend"><i style="background:#2F6B3A"></i>Temperature (&deg;C)</span></div>
                 </div>
             </div>
@@ -89,13 +91,13 @@
         <?php if ($isAdmin): ?>
         <section class="card admin-panel hide" id="admin-panel">
             <div class="ch">
-                <div><h3>Admin management</h3><p class="sub">Manage demo accounts for the UI prototype.</p></div>
+                <div><h3>Admin management</h3><p class="sub">Manage farm accounts and access roles.</p></div>
                 <button class="btn btn-success small-btn" id="add-user" type="button">Add user</button>
             </div>
-            <div class="prototype-warning">Account rows are demo-only and do not save to the database. Admin visibility and threshold updates are role-checked.</div>
+            <p class="sub">Changes are saved to the database. At least one administrator must remain.</p>
             <div class="wrap">
                 <table>
-                    <thead><tr><th>Name</th><th>Email</th><th>Access</th><th>Actions</th></tr></thead>
+                    <thead><tr><th>Name</th><th>Email</th><th>Access</th><th>Status</th><th>Actions</th></tr></thead>
                     <tbody id="users"></tbody>
                 </table>
             </div>
@@ -105,6 +107,8 @@
         <section class="card hide view-panel" id="profile-panel" aria-labelledby="profile-heading">
             <h3 id="profile-heading">Profile</h3>
             <p class="sub">Your GreenPulse account details.</p>
+            <button class="btn btn-outline-danger btn-sm" id="logout-all" type="button">Sign out all devices</button>
+            <p class="sub">Ends all sessions and remembered logins, including this browser.</p>
             <div class="profile-details">
                 <p><strong>Full name: </strong><span><?= e($user['full_name']) ?></span></p>
                 <p><strong>Email: </strong><span><?= e($user['email']) ?></span></p>
@@ -134,25 +138,62 @@
             </div>
         </section>
 
-        <section class="card hide view-panel" id="devices-panel"><h3>Devices</h3><p class="sub">Registered greenhouse hardware and sensor status.</p>
-            <div class="prototype-warning" role="status">Offline · ESP32/MQTT integration is not connected in this prototype.</div>
-            <div class="wrap"><table><thead><tr><th>Device</th><th>Type</th><th>Status</th><th>Calibration</th></tr></thead><tbody><tr><td>Greenhouse A controller</td><td>ESP32</td><td><span class="tag critical">Offline · demo</span></td><td>Not connected</td></tr><tr><td>Temperature / humidity</td><td>Sensor</td><td>Sample data</td><td>Not available</td></tr><tr><td>pH / TDS probe</td><td>Sensor</td><td>Sample data</td><td>Not available</td></tr></tbody></table></div>
-        </section>
-        <section class="card hide view-panel" id="reports-panel"><div class="ch"><div><h3>Reports / History</h3><p class="sub">Sample time-series records for the selected sensor.</p></div><button class="btn btn-outline-success btn-sm" id="print-report" type="button">Print / Save PDF</button></div>
-            <div class="wrap"><table><thead><tr><th>Sample</th><th>Sensor</th><th>Reading</th><th>Range</th></tr></thead><tbody id="history-rows"></tbody></table></div>
+        <section class="card hide view-panel" id="devices-panel"><h3>Devices</h3><p class="sub">Registered greenhouse hardware and its last contact.</p>
+    <div class="wrap"><table><thead><tr><th>Device</th><th>Type</th><th>Status</th><th>Last contact</th></tr></thead><tbody id="device-rows"></tbody></table></div>
+    <?php if ($isAdmin): ?>
+    <button class="btn btn-outline-success btn-sm" id="rotate-device-key" type="button">Generate / replace device key</button>
+    <p class="sub">Replacing the key disconnects clients using the old key. Copy the new key into your ESP32 configuration; it is shown only once.</p>
+    <output id="device-key" style="overflow-wrap:anywhere" aria-live="polite"></output>
+    <?php endif; ?>
+</section>
+        <section class="card hide view-panel" id="reports-panel"><div class="ch"><div><h3>Reports / History</h3><p class="sub">Stored readings for the sensor and date range selected on the dashboard.</p></div><button class="btn btn-outline-success btn-sm" id="print-report" type="button">Print / Save PDF</button></div>
+            <form id="summary-form" class="report-controls">
+                <label>Summary from<input id="report-from" type="date" required></label>
+                <label>Through<input id="report-to" type="date" required></label>
+                <button class="btn btn-success btn-sm" type="submit">Load daily report</button>
+                <button class="btn btn-outline-success btn-sm" id="export-summary" type="button">Export summary CSV</button>
+            </form>
+            <p class="sub" id="summary-method">Daily averages and estimated durations. Dates use Asia/Manila.</p>
+            <div class="wrap"><table><thead><tr><th>Day</th><th>Sensor</th><th>Samples</th><th>Average</th><th>Min / max</th><th>Outside ideal</th><th>Unknown time</th></tr></thead><tbody id="daily-sensors"></tbody></table></div>
+            <h4>Actuator runtime</h4><div class="wrap"><table><thead><tr><th>Day</th><th>Actuator</th><th>Estimated ON time</th><th>Unknown time</th></tr></thead><tbody id="daily-runtime"></tbody></table></div>
+            <h4>Recent raw readings</h4>
+            <div class="wrap"><table><thead><tr><th>Date &amp; time</th><th>Sensor</th><th>Reading</th><th>Range</th></tr></thead><tbody id="history-rows"></tbody></table></div>
             <button class="btn btn-outline-success btn-sm" id="export-history" type="button">Export CSV</button>
         </section>
+        <?php if ($isAdmin): ?>
+        <section class="card hide view-panel" id="activity-panel"><h3>Activity log</h3><p class="sub">Account, threshold, device key, and actuator changes. Passwords and keys are never recorded here.</p>
+            <div class="wrap"><table><thead><tr><th>Date &amp; time</th><th>Who</th><th>Action</th><th>Record</th><th>Changes</th></tr></thead><tbody id="activity-rows"></tbody></table></div>
+            <button id="activity-more" class="btn btn-outline-success btn-sm" type="button">Load older activity</button>
+        </section>
+        <section class="card hide view-panel" id="operations-panel"><h3>Email &amp; backups</h3><p class="sub">Status of scheduled notification processing and verified database backups.</p>
+            <button id="refresh-operations" class="btn btn-outline-success btn-sm" type="button">Refresh status</button>
+            <div id="maintenance-status" aria-live="polite"></div>
+            <h4>Recent email deliveries</h4><div class="wrap"><table><thead><tr><th>Recipient</th><th>Event</th><th>Status</th><th>Attempts</th><th>Sent</th></tr></thead><tbody id="delivery-rows"></tbody></table></div>
+        </section>
+        <?php endif; ?>
     </main>
 </section>
 <div class="notification-popover hide" id="notification-popover" role="status"></div>
 <dialog id="user-dialog">
     <form id="user-form" method="dialog">
-        <h2 id="user-dialog-title">Add demo user</h2>
+        <h2 id="user-dialog-title">Add user</h2>
         <label for="user-name">Full name<input class="form-control" id="user-name" name="name" required></label>
         <label for="user-email">Email<input class="form-control" id="user-email" name="email" type="email" required></label>
+        <label for="user-role">Role<select class="form-select" id="user-role"><option>Farm Staff</option><option>Administrator</option></select></label>
+        <label for="user-status">Account status<select class="form-select" id="user-status"><option>Active</option><option>Pending</option><option>Suspended</option><option>Rejected</option></select></label>
+        <label for="user-password">Password (leave blank to keep existing)<input class="form-control" id="user-password" type="password" minlength="8" maxlength="72" autocomplete="new-password"></label>
+        <p id="user-error" role="alert"></p>
         <div class="dialog-actions">
             <button class="btn btn-outline-secondary" id="cancel-user" type="button">Cancel</button>
-            <button class="btn btn-success small-btn" type="submit">Save demo user</button>
+            <button class="btn btn-success small-btn" type="submit">Save user</button>
         </div>
+    </form>
+</dialog>
+<dialog id="confirm-password-dialog">
+    <form id="confirm-password-form" method="dialog">
+        <h2>Confirm your password</h2><p class="sub">Required for account security and administrator changes. Confirmation lasts five minutes.</p>
+        <label for="confirm-password-input">Your current password<input id="confirm-password-input" type="password" class="form-control" autocomplete="current-password" required></label>
+        <p id="confirm-password-error" role="alert"></p>
+        <div class="dialog-actions"><button class="btn btn-outline-secondary" id="cancel-confirm-password" type="button">Cancel</button><button class="btn btn-success" type="submit">Confirm</button></div>
     </form>
 </dialog>

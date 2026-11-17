@@ -22,8 +22,10 @@ if (is_file($envFile)) {
             $value = substr($value, 1, -1);
         }
 
-        putenv($name . '=' . $value);
-        $_ENV[$name] = $value;
+        if (getenv($name) === false) {
+            putenv($name . '=' . $value);
+            $_ENV[$name] = $value;
+        }
     }
 }
 
@@ -48,7 +50,7 @@ spl_autoload_register(static function (string $class): void {
     }
 });
 
-function e(string|int|null $value): string
+function e(string|int|float|null $value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 }
@@ -64,6 +66,20 @@ function redirect(string $path): never
     exit;
 }
 
-if (session_status() !== PHP_SESSION_ACTIVE) {
+date_default_timezone_set('UTC');
+
+function csrf_token(): string
+{
+    return $_SESSION['csrf_token'] ??= bin2hex(random_bytes(32));
+}
+
+if (PHP_SAPI !== 'cli' && session_status() !== PHP_SESSION_ACTIVE) {
+    ini_set('session.use_strict_mode', '1');
+    session_set_cookie_params([
+        'httponly' => true,
+        'secure' => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
+        'samesite' => 'Lax',
+        'path' => BASE_PATH . '/',
+    ]);
     session_start();
 }

@@ -15,7 +15,7 @@ final class DashboardController extends Controller
             redirect('');
         }
 
-        $user = (new User())->findById((int) $_SESSION['user_id']);
+        $user = \App\Core\AccountSecurity::current();
         if ($user === null) {
             $_SESSION = [];
             session_destroy();
@@ -35,7 +35,7 @@ final class DashboardController extends Controller
 
     public function updateThresholds(): void
     {
-        $user = isset($_SESSION['user_id']) ? (new User())->findById((int) $_SESSION['user_id']) : null;
+        $user = \App\Core\AccountSecurity::current();
         if ($user === null) redirect('');
         if (($user['role'] ?? '') !== 'Administrator') {
             http_response_code(403);
@@ -46,6 +46,7 @@ final class DashboardController extends Controller
             $_SESSION['dashboard_notice'] = 'Your session expired. Please try again.';
             redirect('dashboard');
         }
+        \App\Core\AccountSecurity::requireConfirmation();
         $values = [];
         foreach ((new SensorThreshold())->all() as $sensor) {
             $key = $sensor['key'];
@@ -57,7 +58,7 @@ final class DashboardController extends Controller
             }
             $values[$key] = [$low, $high];
         }
-        (new SensorThreshold())->updateAll($values);
+        (new SensorThreshold())->updateAll($values, (int) $user['id']);
         $_SESSION['dashboard_notice'] = 'Sensor thresholds saved.';
         redirect('dashboard');
     }

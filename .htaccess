@@ -9,7 +9,9 @@ RewriteEngine On
     Require all denied
 </FilesMatch>
 
-RewriteRule ^vendor/ - [F,L]
+RewriteRule ^(vendor|app|config|routes|database|scripts|tests|storage|\.git|\.agents|\.codex)/ - [F,L,NC]
+RewriteRule ^(README\.md|\.gitignore)$ - [F,L,NC]
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
 
 RewriteCond %{REQUEST_FILENAME} -f [OR]
 RewriteCond %{REQUEST_FILENAME} -d
